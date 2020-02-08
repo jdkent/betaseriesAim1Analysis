@@ -1,0 +1,26 @@
+name: aim1_valid
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.7
+  - ipykernel
+  - numpy
+  - seaborn
+  - matplotlib
+  - pandas
+  - nibabel
+  - nilearn
+  - networkx
+  - r-essentials
+  - r-base
+  - r-lme4
+  - r-lmertest
+  - rpy2
+  - dask
+  - pip:
+    - git+https://github.com/aestrivex/bctpy.git@ac68d10dd94cbb544a8908b815f4a3d7e0a49e11
+    - nilearn==0.5.0
+    - pyqt5-sip==4.19.18
+    - pyqtwebengine==5.12.1
+    - sqlalchemy==1.3.13
