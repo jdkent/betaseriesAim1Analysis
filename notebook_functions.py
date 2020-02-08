@@ -2,6 +2,23 @@
 functions to help with keeping the notebook uncluttered
 (and allow testing of the functions)
 """
+import re
+import seaborn as sns
+import pandas as pd
+import numpy as np
+import networkx as nx
+import matplotlib.pyplot as plt
+from multiprocessing.pool import Pool
+
+from rpy2 import robjects as robj
+from rpy2.robjects import pandas2ri
+from rpy2.robjects.conversion import localconverter
+from rpy2.robjects.packages import importr
+
+from bct.algorithms.modularity import community_louvain
+from bct.algorithms.clustering import clustering_coef_wu_sign
+from bct.algorithms.centrality import participation_coef_sign
+
 
 def _read_adj_matrix(file):
     """read the adjacency matrix file
@@ -47,7 +64,7 @@ def _fishers_z_to_r(z):
 def _adj_to_edge(df):
     """convert adjacency matrix to edge list
     """
-    return nx.to_pandas_edgelist(nx.from_pandas_adjacency(adj_df))
+    return nx.to_pandas_edgelist(nx.from_pandas_adjacency(df))
 
 
 def _identify_within_between(edge_df):
@@ -62,21 +79,21 @@ def _identify_within_between(edge_df):
 
 
 def _condense_within_between(proc_edge_df):
-    info_df = edge_df.groupby(['network_connection', 'source_network']).describe().T.loc[('weight', 'mean'), :].to_frame()
+    info_df = proc_edge_df.groupby(['network_connection', 'source_network']).describe().T.loc[('weight', 'mean'), :].to_frame()
     info_df.columns = info_df.columns.droplevel()
     info_df.reset_index(inplace=True)
 
     return info_df
 
 
-def summarize_network_correlations(file, participant):
+def summarize_network_correlations(file, participant_id):
     """
     Parameters
     ----------
     file : str
         filename of symmetric adjacency matrix
-    participant : participant
-        participant identifier
+    participant_id : participant_id
+        participant_id identifier
 
     Returns
     -------
@@ -92,9 +109,9 @@ def summarize_network_correlations(file, participant):
 
     info_df = _condense_within_between(proc_edge_df)
 
-    info_df['participant'] = [participant] * info_df.shape[0]
+    info_df['participant_id'] = [participant_id] * info_df.shape[0]
 
-    print(f"finished {participant}")
+    print(f"finished {participant_id}")
 
     return info_df
 
@@ -111,29 +128,29 @@ def _subtract_matrices(file1, file2):
     return diff_edge_df
 
 
-def _proc_diff_df(edge_df, participant):
+def _proc_diff_df(edge_df, participant_id):
     """slightly redundant with summarize_network
     """
     proc_edge_df = _identify_within_between(edge_df)
 
     info_df = _condense_within_between(proc_edge_df)
 
-    info_df['participant'] = [participant] * info_df.shape[0]
+    info_df['participant_id'] = [participant_id] * info_df.shape[0]
 
     info_df.reset_index(inplace=True)
 
-    print(f"finished {participant}")
+    print(f"finished {participant_id}")
     
     return info_df
 
 
-def calc_diff_matrices(file1, file2, participant):
+def calc_diff_matrices(file1, file2, participant_id):
     """calculate the average within/between network correlation differences
     between two adjacency matrices
     """  
     edge_df = _subtract_matrices(file1, file2)
     
-    out_df = _proc_diff_df(edge_df, participant)
+    out_df = _proc_diff_df(edge_df, participant_id)
 
     # translate the difference back to a Pearson's R.
     out_df['mean_r'] = _fishers_z_to_r(out_df['mean'])
@@ -141,13 +158,13 @@ def calc_diff_matrices(file1, file2, participant):
     return out_df
 
 
-def z_score_cutoff(arr, thresh)
-"""give correlations very close to 1 a more reasonable z-score
-0.99 r == 2.647 z
-(this is the max z score I would be interested in,
- anything above does not explain meaningful differences)
-"""
-return arr.clip(-thresh, thresh)
+def z_score_cutoff(arr, thresh):
+    """give correlations very close to 1 a more reasonable z-score
+    0.99 r == 2.647 z
+    (this is the max z score I would be interested in,
+     anything above does not explain meaningful differences)
+    """
+    return arr.clip(-thresh, thresh)
 
 
 def _combine_adj_matrices_wide(dfs):
@@ -162,7 +179,7 @@ def _combine_adj_matrices_wide(dfs):
 def bind_matrices(objs, label):
     """combine all adjacency matrices to a wide format where
     each column represents a unique roi-roi pair and each row represents
-    an observation from a participant.
+    an observation from a participant_id.
     """
 
     dfs = [_read_adj_matrix(obj.path) for obj in objs]
@@ -241,13 +258,14 @@ def make_symmetric_df(df, measure):
     return pretty_df
 
 
-def _make_pretty_schaefer_heatmap(adj_df):
+def _make_pretty_schaefer_heatmap(adj_df, **hm_kwargs):
     if adj_df.shape[0] != adj_df.shape[1]:
         raise ValueError("The dataframe is not square")
 
     # get the network assignments (assumed name is like ContA-LH_SPL_1)
     networks = adj_df.columns.str.split('-', n=1, expand=True).get_level_values(0)
     # at what indices do the networks change (e.g., go from ContA to ContB)
+    # https://stackoverflow.com/questions/19125661/find-index-where-elements-change-value-numpy
     network_change_idxs = np.where(np.roll(networks,1)!=networks)[0]
     # find the midpoint index in each network to place a label
     tmp_idx = np.append(network_change_idxs, adj_df.shape[0])
@@ -256,7 +274,7 @@ def _make_pretty_schaefer_heatmap(adj_df):
     # create figure axes to plot onto
     fig, ax = plt.subplots(figsize=(24, 20))
     # make the heatmap
-    ax = sns.heatmap(adj_df, ax=ax)
+    ax = sns.heatmap(adj_df, ax=ax, **hm_kwargs)
     # add horizontal (hlines) and vertical (vlines) to delimit networks
     ax.hlines(network_change_idxs, xmin=0, xmax=adj_df.shape[0])
     ax.vlines(network_change_idxs, ymin=0, ymax=adj_df.shape[1])
@@ -283,23 +301,25 @@ def _identify_nan_entries(adj_df):
     nan_idxs = np.argwhere(np.isnan(adj_arr[0,:]))
     nan_rois = rois[nan_idxs]
 
-    return nan_rois, len(nan_rois)
+    return nan_idxs, nan_rois, len(nan_rois)
 
 
 def _run_graph_theory_measure(adj_df, graph_func, **graph_kwargs):
-    adj_df = adj_df.rename(_flip_hemisphere_network, axis=1).rename(_flip_hemisphere_network, axis=0)
-    nan_rois, num_nan_rois = _identify_nan_entries(adj_df)
-    adj_df = adj_df.dropna(how='all', axis=1).dropna(how='all', axis=0)
+    nan_idxs, nan_rois, num_nan_rois = _identify_nan_entries(adj_df)
+    adj_df = adj_df.drop(labels=nan_rois, axis=1).drop(labels=nan_rois, axis=0)
     adj_arr = adj_df.values
 
     np.fill_diagonal(adj_arr, 0)
+
+    if 'ci' in graph_kwargs.keys() and nan_rois.any():
+        graph_kwargs['ci'] = np.delete(graph_kwargs['ci'], nan_idxs)
 
     graph_output = graph_func(adj_arr, **graph_kwargs)
 
     return nan_rois, num_nan_rois, graph_output
 
 
-def calc_modularity(file, participant, task):
+def calc_modularity(file, participant_id, task):
     # read the file
     adj_df = _read_adj_matrix(file)
     
@@ -310,7 +330,7 @@ def calc_modularity(file, participant, task):
     orig_ci = adj_df.columns.str.split('-', n=1, expand=True).get_level_values(0)
 
     # run modularity
-    nan_rois, num_nan_rois, ci, modularity = _run_graph_theory_measure(
+    nan_rois, num_nan_rois, (ci, modularity) = _run_graph_theory_measure(
         adj_df, community_louvain, B='negative_asym', ci=orig_ci
     )
 
@@ -321,15 +341,15 @@ def calc_modularity(file, participant, task):
         'num_nan_rois': num_nan_rois,
         'ci': ci,
         'num_ci': num_ci,
-        'modularity': modularity
-        'participant': participant,
+        'modularity': modularity,
+        'participant_id': participant_id,
         'task': task,
     }
 
     return result_dict
 
 
-def calc_clustering_coef(file, participant, task):
+def calc_clustering_coef(file, participant_id, task):
     # read the file
     adj_df = _read_adj_matrix(file)
     
@@ -352,13 +372,13 @@ def calc_clustering_coef(file, participant, task):
 
     cluster_coef_dict['nan_rois'] = nan_rois
     cluster_coef_dict['num_nan_rois'] = num_nan_rois
-    cluster_coef_dict['participant'] = participant
+    cluster_coef_dict['participant_id'] = participant_id
     cluster_coef_dict['task'] = task
 
     return cluster_coef_dict
 
 
-def calc_participation_coef(file, participant, task):
+def calc_participation_coef(file, participant_id, task):
     # read the file
     adj_df = _read_adj_matrix(file)
     
@@ -367,17 +387,16 @@ def calc_participation_coef(file, participant, task):
 
     ci = adj_df.columns.str.split('-', n=1, expand=True).get_level_values(0)
 
-    nan_rois, num_nan_rois, pos_p_coef, neg_p_coef = _run_graph_theory_measure(
+    nan_rois, num_nan_rois, (pos_p_coef, neg_p_coef) = _run_graph_theory_measure(
         adj_df, participation_coef_sign, ci=ci
     )
-
     # combine participation coefs with their respective rois
     track_idx = 0
     participation_coef_dict = {}
     for roi in adj_df.columns:
         roi_pos = roi + '_pos'
         roi_neg = roi + '_neg'
-        if roi in nan_rois:
+        if roi in list(nan_rois):
             participation_coef_dict[roi_pos] = np.nan
             participation_coef_dict[roi_neg] = np.nan
         else:
@@ -387,7 +406,7 @@ def calc_participation_coef(file, participant, task):
     
     participation_coef_dict['nan_rois'] = nan_rois
     participation_coef_dict['num_nan_rois'] = num_nan_rois
-    participation_coef_dict['participant'] = participant
+    participation_coef_dict['participant_id'] = participant_id
     participation_coef_dict['task'] = task
 
     return participation_coef_dict
