@@ -199,12 +199,17 @@ def _run_model(df, col):
     filt_df = filt_df.rename({col: 'correlation'}, axis=1)
     collector_dict = {'source_target': None, 'p_value': None, 'estimate': None}
     with localconverter(robj.default_converter + pandas2ri.converter):
-          r_df = robj.conversion.py2rpy(filt_df)
+        r_df = robj.conversion.py2rpy(filt_df)
     model = STATS.lm(formula='correlation ~ task', data=r_df)
     summary = BASE.summary(model)
     res = summary.rx2('coefficients')
-    p_val = res[7] # manually check this
-    estimate = res[1] # manually check this
+    res = np.asarray(res) # sometimes is a FloatMatrix
+    if res.ndim == 2:
+        p_val = res[1][3]
+        estimate = res[1][0]
+    else:
+        p_val = res[7] # manually check this
+        estimate = res[1] # manually check this
     # print(col)
     # print(res)
     collector_dict['source_target'] = col
@@ -218,7 +223,7 @@ def model_corr_diff_mt(wide_df, n_threads):
     """
     cols = set(wide_df.columns)
     # I do not want to iterate over these columns
-    cols = list(cols - set(["task", "participant_id"]))
+    cols = list(cols - set(["task", "participant_id", "nan_rois", "num_nan_rois"]))
     args = [(wide_df[['participant_id', 'task', col]], col) for col in cols]
     # run this in parallel to speed up computation
     with Pool(n_threads) as p:
@@ -325,16 +330,18 @@ def calc_modularity(file, participant_id, task):
     
     # rename and sort the columns
     adj_df = _sort_columns(adj_df)
+    
+    adj_r_df = _fishers_z_to_r(adj_df)
 
     # pass the original community classification (based on schaefer)
-    orig_ci = adj_df.columns.str.split('-', n=1, expand=True).get_level_values(0)
+    orig_ci = adj_r_df.columns.str.split('-', n=1, expand=True).get_level_values(0)
 
     # run modularity
     nan_rois, num_nan_rois, (ci, modularity) = _run_graph_theory_measure(
-        adj_df, community_louvain, B='negative_asym', ci=orig_ci
+        adj_r_df, community_louvain, B='negative_asym', ci=orig_ci
     )
 
-    num_ci = np.unique(ci)
+    num_ci = len(np.unique(ci))
 
     result_dict = {
         'nan_rois': nan_rois,
@@ -355,16 +362,18 @@ def calc_clustering_coef(file, participant_id, task):
     
     # rename and sort the columns
     adj_df = _sort_columns(adj_df)
+    
+    adj_r_df = _fishers_z_to_r(adj_df)
 
     nan_rois, num_nan_rois, cluster_coefs = _run_graph_theory_measure(
-        adj_df, clustering_coef_wu_sign, coef_type='constantini'
+        adj_r_df, clustering_coef_wu_sign, coef_type='constantini'
     )
 
     # combine cluster coefs with their respective rois
     track_idx = 0
     cluster_coef_dict = {}
     for roi in adj_df.columns:
-        if roi in nan_rois:
+        if roi in list(nan_rois):
             cluster_coef_dict[roi] = np.nan
         else:
             cluster_coef_dict[roi] = cluster_coefs[track_idx]
@@ -384,16 +393,18 @@ def calc_participation_coef(file, participant_id, task):
     
     # rename and sort the columns
     adj_df = _sort_columns(adj_df)
+    
+    adj_r_df = _fishers_z_to_r(adj_df)
 
-    ci = adj_df.columns.str.split('-', n=1, expand=True).get_level_values(0)
+    ci = adj_r_df.columns.str.split('-', n=1, expand=True).get_level_values(0)
 
     nan_rois, num_nan_rois, (pos_p_coef, neg_p_coef) = _run_graph_theory_measure(
-        adj_df, participation_coef_sign, ci=ci
+        adj_r_df, participation_coef_sign, ci=ci
     )
     # combine participation coefs with their respective rois
     track_idx = 0
     participation_coef_dict = {}
-    for roi in adj_df.columns:
+    for roi in adj_r_df.columns:
         roi_pos = roi + '_pos'
         roi_neg = roi + '_neg'
         if roi in list(nan_rois):
